@@ -8,6 +8,8 @@ import (
 
 // AccountRepository defines the persistence operations required by Service.
 type AccountRepository interface {
+	CreateAccount(ctx context.Context) (domain.Account, error)
+	GetAccount(ctx context.Context, accountID int64) (domain.Account, error)
 	Deposit(ctx context.Context, accountID int64, amount int64) (domain.Account, error)
 	Transfer(ctx context.Context, fromAccountID int64, toAccountID int64, amount int64) error
 }
@@ -18,6 +20,14 @@ type Service struct {
 
 func New(repository AccountRepository) *Service {
 	return &Service{repository: repository}
+}
+
+func (s *Service) CreateAccount(ctx context.Context) (domain.Account, error) {
+	return s.repository.CreateAccount(ctx)
+}
+
+func (s *Service) GetAccount(ctx context.Context, accountID int64) (domain.Account, error) {
+	return s.repository.GetAccount(ctx, accountID)
 }
 
 func (s *Service) Deposit(

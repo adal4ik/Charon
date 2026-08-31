@@ -16,6 +16,14 @@ type fakeAccountRepository struct {
 	transferErr   error
 }
 
+func (f *fakeAccountRepository) CreateAccount(context.Context) (domain.Account, error) {
+	panic("unexpected call to CreateAccount")
+}
+
+func (f *fakeAccountRepository) GetAccount(context.Context, int64) (domain.Account, error) {
+	panic("unexpected call to GetAccount")
+}
+
 func (f *fakeAccountRepository) Deposit(
 	context.Context,
 	int64,
