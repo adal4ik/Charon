@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: charon
+      POSTGRES_USER: charon
+      POSTGRES_PASSWORD: charon
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/000001_create_accounts.up.sql:/docker-entrypoint-initdb.d/000001_create_accounts.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U charon -d charon"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: "postgres://charon:charon@postgres:5432/charon?sslmode=disable"
+      HTTP_ADDR: ":8080"
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
