@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/adal4ik/Charon/internal/domain"
 	"github.com/adal4ik/Charon/internal/service"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 type accountResponse struct {
@@ -35,18 +37,44 @@ type errorResponse struct {
 // Handler handles Ledger HTTP requests.
 type Handler struct {
 	service *service.Service
+	logger  *slog.Logger
 }
 
-func NewHandler(accountService *service.Service) *Handler {
-	return &Handler{service: accountService}
+func NewHandler(accountService *service.Service, logger *slog.Logger) *Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &Handler{
+		service: accountService,
+		logger:  logger,
+	}
+}
+
+// log returns the handler logger tagged with the current request id, so that
+// every record produced while serving one call can be grouped together.
+func (h *Handler) log(r *http.Request) *slog.Logger {
+	return h.logger.With(slog.String("request_id", middleware.GetReqID(r.Context())))
+}
+
+// declined reports whether err is a business refusal rather than a failure.
+// Refusals are an expected outcome and are logged where they happen; anything
+// else is left to writeDomainError, which records it as an error.
+func declined(err error) bool {
+	return errors.Is(err, domain.ErrInvalidAmount) ||
+		errors.Is(err, domain.ErrSameAccount) ||
+		errors.Is(err, domain.ErrAccountNotFound) ||
+		errors.Is(err, domain.ErrInsufficientFunds)
 }
 
 func (h *Handler) createAccount(w http.ResponseWriter, r *http.Request) {
 	account, err := h.service.CreateAccount(r.Context())
 	if err != nil {
-		writeDomainError(w, err)
+		h.writeDomainError(w, r, err)
 		return
 	}
+
+	h.log(r).InfoContext(r.Context(), "account created", slog.Int64("account_id", account.ID))
 
 	if err := writeJSON(w, http.StatusCreated, newAccountResponse(account)); err != nil {
 		return
@@ -62,7 +90,7 @@ func (h *Handler) getAccount(w http.ResponseWriter, r *http.Request) {
 
 	account, err := h.service.GetAccount(r.Context(), accountID)
 	if err != nil {
-		writeDomainError(w, err)
+		h.writeDomainError(w, r, err)
 		return
 	}
 
@@ -86,9 +114,26 @@ func (h *Handler) deposit(w http.ResponseWriter, r *http.Request) {
 
 	account, err := h.service.Deposit(r.Context(), accountID, request.Amount)
 	if err != nil {
-		writeDomainError(w, err)
+		if declined(err) {
+			h.log(r).WarnContext(
+				r.Context(),
+				"deposit declined",
+				slog.Int64("account_id", accountID),
+				slog.Int64("amount", request.Amount),
+				slog.String("reason", err.Error()),
+			)
+		}
+		h.writeDomainError(w, r, err)
 		return
 	}
+
+	h.log(r).InfoContext(
+		r.Context(),
+		"deposit completed",
+		slog.Int64("account_id", accountID),
+		slog.Int64("amount", request.Amount),
+		slog.Int64("balance", account.Balance),
+	)
 
 	if err := writeJSON(w, http.StatusOK, newAccountResponse(account)); err != nil {
 		return
@@ -114,9 +159,27 @@ func (h *Handler) transfer(w http.ResponseWriter, r *http.Request) {
 		request.Amount,
 	)
 	if err != nil {
-		writeDomainError(w, err)
+		if declined(err) {
+			h.log(r).WarnContext(
+				r.Context(),
+				"transfer declined",
+				slog.Int64("from_account_id", request.FromAccountID),
+				slog.Int64("to_account_id", request.ToAccountID),
+				slog.Int64("amount", request.Amount),
+				slog.String("reason", err.Error()),
+			)
+		}
+		h.writeDomainError(w, r, err)
 		return
 	}
+
+	h.log(r).InfoContext(
+		r.Context(),
+		"transfer completed",
+		slog.Int64("from_account_id", request.FromAccountID),
+		slog.Int64("to_account_id", request.ToAccountID),
+		slog.Int64("amount", request.Amount),
+	)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -164,7 +227,7 @@ func newAccountResponse(account domain.Account) accountResponse {
 	}
 }
 
-func writeDomainError(w http.ResponseWriter, err error) {
+func (h *Handler) writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, domain.ErrInvalidAmount):
 		writeError(w, http.StatusBadRequest, domain.ErrInvalidAmount.Error())
@@ -175,6 +238,13 @@ func writeDomainError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrInsufficientFunds):
 		writeError(w, http.StatusConflict, domain.ErrInsufficientFunds.Error())
 	default:
+		h.log(r).ErrorContext(
+			r.Context(),
+			"HTTP request failed",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Any("error", err),
+		)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 }
