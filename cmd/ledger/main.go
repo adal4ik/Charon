@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,12 +25,15 @@ const (
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatalf("ledger stopped: %v", err)
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	if err := run(logger); err != nil {
+		logger.Error("ledger stopped", slog.Any("error", err))
+		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(logger *slog.Logger) error {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is required")
@@ -55,16 +59,24 @@ func run() error {
 
 	accountRepository := repository.NewPostgresRepository(pool)
 	accountService := service.New(accountRepository)
-	handler := httpapi.NewHandler(accountService)
+	handler := httpapi.NewHandler(accountService, logger)
 	router := httpapi.NewRouter(handler)
 
 	server := &http.Server{
-		Addr:              httpAddress,
-		Handler:           router,
+		Addr:    httpAddress,
+		Handler: router,
+		// Without this, net/http writes panics and connection-level errors as
+		// plain text through the standard logger, bypassing the JSON handler.
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+	}
+
+	listener, err := net.Listen("tcp", httpAddress)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", httpAddress, err)
 	}
 
 	signalCtx, stopSignals := signal.NotifyContext(
@@ -76,9 +88,9 @@ func run() error {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("HTTP server listening on %s", httpAddress)
-		serverErrors <- server.ListenAndServe()
+		serverErrors <- server.Serve(listener)
 	}()
+	logger.Info("HTTP server started", slog.String("address", listener.Addr().String()))
 
 	select {
 	case err := <-serverErrors:
@@ -87,7 +99,7 @@ func run() error {
 		}
 		return nil
 	case <-signalCtx.Done():
-		log.Printf("shutdown signal received")
+		logger.Info("shutdown signal received")
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
